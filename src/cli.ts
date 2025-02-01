@@ -1,7 +1,60 @@
 import { writeFile } from "fs/promises";
 import { program } from "@commander-js/extra-typings";
 import { MiroBoard } from "./index.js";
+import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
+import fetch from "node-fetch";
 import type { FrameBoardObject } from "./miro-types.ts";
+
+async function convertSvgImages(svgContent: string, authToken?: string): Promise<string> {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(svgContent, 'image/svg+xml');
+
+  const images = doc.getElementsByTagName('image');
+
+  for (let i = 0; i < images.length; i++) {
+    const image = images[i];
+    const href = image.getAttribute('xlink:href') || image.getAttribute('href');
+
+    if (href && href.startsWith('http')) {
+      try {
+        const headers: Record<string, string> = {};
+        if (authToken) {
+          headers['Cookie'] = `token=${authToken}`;
+        }
+
+        const response = await fetch(href, {
+          headers
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch image: ${response.statusText}`);
+        }
+
+        // Convert to buffer and then to base64
+        const buffer = await response.buffer();
+        const base64 = buffer.toString('base64');
+
+        // Determine mime type from response headers or fallback to png
+        const contentType = response.headers.get('content-type') || 'image/png';
+
+        // Create the data URL
+        const dataUrl = `data:${contentType};base64,${base64}`;
+
+        // Update the image attribute
+        image.removeAttribute('xlink:href');
+        image.setAttribute('href', dataUrl);
+
+        console.log(`Converted image ${i + 1}/${images.length}`);
+      } catch (error) {
+        console.error(`Error converting image ${href}:`, error);
+      }
+    }
+  }
+
+  // Serialize back to string
+  const serializer = new XMLSerializer();
+  return serializer.serializeToString(doc);
+}
 
 const { token, boardId, frameNames, outputFile, exportFormat } = program
   .option("-t, --token <token>", "Miro token")
@@ -39,9 +92,11 @@ const { token, boardId, frameNames, outputFile, exportFormat } = program
   }
 
   async function getSvg(frames?: FrameBoardObject[]) {
-    return await miroBoard.getSvg(
+    const svg = await miroBoard.getSvg(
       frames?.map(({ id }) => id).filter((id): id is string => !!id)
     );
+    // Convert images in SVG to base64
+    return await convertSvgImages(svg, token);
   }
 
   async function getJson(frames?: FrameBoardObject[]) {
